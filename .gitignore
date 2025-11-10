@@ -3,7 +3,7 @@
 data/*
 
 # exception to the rule to keep the 
-!somefolder/README.md
+!data/README.md
 
 
 # OS files

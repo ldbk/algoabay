@@ -1,0 +1,765 @@
+---
+title: "Cleaning AIS data"
+author: "Anna Mazaleyrat"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+params:
+  year: 2016
+output:
+  rmdformats::downcute:
+    lightbox: true
+    toc_depth: 3
+    code_folding: hide
+    number_section: yes
+editor_options:
+  chunk_output_type: console
+  markdown:
+    wrap: 80
+---
+
+```{r echo=FALSE}
+operationnel <- TRUE
+knitr::opts_chunk$set(
+  warning = !operationnel,
+  message = !operationnel,
+  fig.width = 7,
+  fig.height = 5,
+  progress = !operationnel,
+  verbose = !operationnel
+)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(arrow)
+library(here)
+library(tidyverse)
+library(sf)
+library(htmltools)
+library(viridis)
+library(data.table)
+library(geosphere)
+library(mapview)
+library(htmltools)
+library(future.apply)# devtools::build(here("code/r-packages_iapesca"))
+# devtools::document(here("code/r-packages_iapesca"))
+# 
+# library(iapesca)
+```
+
+```{r setup, include=FALSE}
+library(leaflet)
+leaflet()
+```
+
+# Introduction
+
+The dataset used in this analysis is provided by the CEREMA. This document
+details the steps for cleaning of AIS (Automatic Identification System) data.
+The workflow involves:
+
+1\. Filtering out invalid or irrelevant data.
+
+2\. Excluding pings associated with erroneous trip IDs.
+
+3\. Removing pings on land.
+
+4\. Addressing potential data quality issues, such as unrealistic vessel speeds.
+
+# Loading and inspecting AIS data
+
+We begin by loading the raw AIS dataset and inspecting its structure.
+
+```{r}
+# Load AIS data for the specified year
+AIS_sacrois_raw <- open_dataset(
+  paste(here("data/raw/AIS3"), "/year=", params$year, sep = "")
+)
+
+# Inspect dataset structure
+glimpse(head(AIS_sacrois_raw,10), width = 50)
+```
+
+# Data cleaning
+
+## Excluding trips without AIS data
+
+In this section, we inspect the AIS data to identify and filter out pings
+without valid trip_ids (MAREE_ID).
+
+```{r}
+# Filter and transform AIS data
+# Summary statistics for AIS pings
+total_pings <- AIS_sacrois_raw %>% 
+  nrow()
+
+trip_pings <- AIS_sacrois_raw %>%
+  filter(!is.na(MAREE_ID)) %>%
+  summarise(n()) %>%
+  collect() %>% 
+  pull()
+    
+
+no_trip_pings <- total_pings - trip_pings
+percent_wt_trip <- round((trip_pings / total_pings) * 100, 1)
+
+ping_maree <- AIS_sacrois_raw %>%
+  filter(!is.na(MAREE_ID)) %>%
+  summarise(n_distinct(MAREE_ID)) %>%
+  pull()
+
+# Print summary
+cat(
+  "Total AIS pings:", total_pings, "\n",
+  "Pings without trip_id:", no_trip_pings, "\n",
+  "Pings with trip_id:", trip_pings, "(", percent_wt_trip, "% of pings)", "\n",
+  "Nb of trips with pings:", ping_maree, "\n"
+)
+
+rm(total_pings, trip_pings, no_trip_pings)
+
+
+# Retain only valid trip IDs
+AIS_sacrois <- AIS_sacrois_raw %>%
+  filter(!is.na(MAREE_ID)) %>% 
+  arrange(MMSI, timeais) %>% 
+  collect()
+```
+
+Latter in the document when we refer to the total number of pings, this refers
+to the pings kept at this step (i.e pings with a trip_id)
+
+## Excluding unexpected trip IDs
+
+Sometimes, there are unexpected MAREE_ID values that are abnormally long. This
+section detects and removes them.
+
+```{r}
+# Identify and remove strange MAREE_IDs (length > 15)
+AIS_sacrois$ID_strange <- ifelse(nchar(AIS_sacrois$MAREE_ID) > 15, "yes", "no")
+
+temp_AIS_sacrois = filter(AIS_sacrois, ID_strange=="yes") 
+
+if (length(temp_AIS_sacrois) > 0) {
+
+cat(length(unique(temp_AIS_sacrois$MAREE_ID)), "strange trip_id for a total of", nrow(temp_AIS_sacrois), "pings (", round(nrow(temp_AIS_sacrois) * 100 / nrow(AIS_sacrois), 3), "% of total pings)")
+  
+  head(temp_AIS_sacrois %>%  distinct(MAREE_ID))
+
+
+  # Remove erroneous trip IDs
+AIS_sacrois2 <- AIS_sacrois %>% filter(!(MAREE_ID %in% temp_AIS_sacrois$MAREE_ID)) %>% 
+  dplyr::select(-ID_strange)
+
+} else {
+  cat("No such pings, we continue to the next cleaning step.")
+  AIS_sacrois2 = AIS_sacrois %>% 
+  dplyr::select(-ID_strange)
+  
+}
+
+head(temp_AIS_sacrois$MAREE_ID)
+rm(temp_AIS_sacrois)
+
+nrow_AIS_sacrois = nrow(AIS_sacrois)
+rm(AIS_sacrois)
+```
+
+## Excluding trips out of boundaries
+
+These out-of-bounds pings fall outside the zone of interest, which is defined by
+longitude between [-10; 5] and latitude between [42; 52]. We remove any MAREE_ID
+for which all pings fall outside these geographical limits.
+
+```{r results='asis'}
+AIS_sacrois2 <- AIS_sacrois2 %>%
+  mutate(out_of_bonds = ifelse(Longitude > 5 | Longitude < -10| Latitude < 42 | Latitude > 52, "yes", "no")) %>%
+  group_by(MAREE_ID) %>%
+  mutate(perc = sum(out_of_bonds == "yes") / n()) %>%
+  ungroup()
+
+
+temp_AIS_sacrois <- filter(AIS_sacrois2, perc == "1")
+
+
+if (nrow(temp_AIS_sacrois) > 0) {
+  cat("There are", nrow(temp_AIS_sacrois), "pings out of bounds (", length(unique(temp_AIS_sacrois$MAREE_ID)), " trip_id) representing", round(nrow(temp_AIS_sacrois) * 100 / nrow_AIS_sacrois, 2), "% of total pings.\n\n\n")
+
+  problematic_trips <- temp_AIS_sacrois %>%
+    distinct(MAREE_ID) %>%
+    slice(1:15)
+
+  line_data <- AIS_sacrois2 %>%
+    st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326, remove = FALSE) %>%
+    filter(MAREE_ID %in% problematic_trips$MAREE_ID) %>%
+    group_by(MAREE_ID) %>%
+    summarise(
+      geometry = st_combine(geometry) %>% st_cast("LINESTRING")
+    ) %>%
+    ungroup() %>%
+    mutate(MAREE_ID = as.factor(MAREE_ID))
+
+  # Set up color palettes
+  trips_colors <- colorFactor(viridis(15), domain = problematic_trips$MAREE_ID)
+
+  excluded_coords <- st_sfc(
+    st_polygon(list(
+      matrix(c(-10, 42, 5, 42, 5, 52, -10, 52, -10, 42), ncol = 2, byrow = TRUE)
+    )),
+    crs = 4326
+  )
+
+  # Visualize with Leaflet
+page = htmltools::tagList(leaflet() %>%
+    addTiles() %>%
+    addPolylines(
+      data = line_data, color = ~ trips_colors(MAREE_ID),
+      group = ~ line_data$MAREE_ID
+    ) %>%
+    addScaleBar(position = "bottomleft", options = scaleBarOptions(imperial = FALSE)) %>%
+    addPolygons(
+      data = excluded_coords, color = "black", weight = 2, fill = TRUE, fillColor = "rgba(0, 0, 255, 0.2)", group = "Excluded Area"
+    ))
+
+cat(as.character(page))
+
+  # We removed these trips
+  trips_to_remove <- temp_AIS_sacrois %>%
+    distinct(MAREE_ID)
+
+  AIS_sacrois2 <- anti_join(AIS_sacrois2, trips_to_remove) %>%
+    dplyr::select(-c(out_of_bonds, perc))
+
+  rm(trips_to_remove, trips_colors, excluded_coords, temp_AIS_sacrois, problematic_trips, line_data)
+} else {
+  cat("No such pings, we continue to the next cleaning step.")
+}
+```
+
+## Excluding pings on land
+
+Pings may occasionally be located on land/port. This step identifies and removes
+such pings.
+
+Here is an example of pings removed.
+
+```{r results='asis'}
+# Check for pings on land
+region <- st_read(here("data/raw/geomatics/regions-20180101-shp/regions-20180101_modif.gpkg"), quiet = TRUE)
+
+#mapview(region)
+
+# Convert AIS data to spatial object
+AIS_sacrois2 <- AIS_sacrois2 %>%
+  st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326, remove = FALSE)
+
+# Identify pings intersecting land
+temp <- st_intersects(AIS_sacrois2, region, sparse = FALSE)
+AIS_sacrois2$intersect <- temp
+
+# Filter out pings on land
+AIS_sacrois_land <- AIS_sacrois2 %>%
+  filter(intersect == "TRUE")
+
+
+# Visualize pings on land using leaflet
+if (nrow(AIS_sacrois_land) > 0) {
+
+  inside_count <- nrow(AIS_sacrois_land)
+percent_inside <- round((nrow(AIS_sacrois_land) / nrow_AIS_sacrois) * 100, 1)
+
+cat(
+  inside_count, "pings on land representing", percent_inside, "% of total pings.\n\n\n"
+)
+
+
+page = htmltools::tagList(leaflet() %>%
+  addTiles() %>%
+  addCircleMarkers(data = AIS_sacrois_land %>% slice(1:25000), radius = 0.5) %>%
+  addPolylines(data = region, col = "black", stroke = 0.2, fillOpacity = 0.1) %>%
+  addScaleBar(position = "bottomleft", options = scaleBarOptions(imperial = FALSE)))
+
+cat(as.character(page))
+
+AIS_sacrois2 <- AIS_sacrois2 %>%
+  filter(intersect == "FALSE")
+
+  rm(inside_count, percent_inside)
+} else {
+  cat("No such pings, we continue to the next cleaning step.")
+}
+
+AIS_sacrois2 = AIS_sacrois2 %>% 
+  dplyr::select(-intersect)
+
+rm(AIS_sacrois_land, temp)
+```
+
+## Excluding duplicated lines
+
+We check wether they are duplicated, i.e data with the VESSEL_ID, Longitude,
+Latitude, and time
+
+```{r}
+setDT(AIS_sacrois2)
+temp <- AIS_sacrois2[, .N, by = .(NAVS_COD, Longitude, Latitude, timeais)][N > 1]
+
+
+if (nrow(temp) > 0) {
+  temp2 <- AIS_sacrois2 %>%
+    distinct()
+
+  cat("Duplicated lines are found. Number of lines:", nrow(AIS_sacrois2), "\n\n\n")
+  cat("Number of distinct lines:", nrow(temp2), "\n")
+
+  AIS_sacrois2 <- AIS_sacrois2 %>%
+    distinct()
+
+  rm(temp2)
+} else {
+  cat("No such pings, we continue to the next cleaning step.")
+}
+
+rm(temp)
+```
+
+## Excluding pseudo-pings
+
+We verify that two pings for the same vessel are not taken within 0.25 minutes
+(i.e 15 s).
+
+```{r}
+AIS_sacrois2 <- AIS_sacrois2 %>%
+  group_by(MAREE_ID) %>% 
+  arrange(timeais) %>% 
+  mutate(elapsed_time2 = as.numeric(difftime(lead(timeais), timeais, units = "mins")), 
+         interval_correct = ifelse(elapsed_time2 < 0.25, "no", "yes"))
+
+if (nrow(AIS_sacrois2 %>% filter(interval_correct=="no")) > 0) {
+
+
+cat(nrow(AIS_sacrois2 %>% filter(interval_correct=="no")), "duplicated pings. \n
+    We remove those pings")
+  
+
+} else {
+  cat("No such pings, we continue to the next cleaning step.")
+}
+
+AIS_sacrois2 = AIS_sacrois2 %>% 
+  dplyr::select(-c(elapsed_time2, interval_correct))
+```
+
+## Exluding pings with an impossible lat/lon location
+
+We delete ping that have an abs(Longitude) \> 180 or a abs(Latitude) \>90
+
+```{r}
+temp_AIS_sacrois <- AIS_sacrois2 %>%
+  filter(abs(Longitude) >180 | abs(Latitude) > 90)
+
+
+if (nrow(temp_AIS_sacrois) > 0) {
+  cat(nrow(temp_AIS_sacrois %>% distinct(MAREE_ID)), "trip_id with at least one ping with an odd longitude or latitude.", nrow(temp_AIS_sacrois), "pings concerned represent", round(nrow(temp_AIS_sacrois) * 100 / nrow_AIS_sacrois, 4), "% of total pings.\n\n\n")
+
+  AIS_sacrois2 = AIS_sacrois2 %>% 
+  anti_join(temp_AIS_sacrois)
+
+} else {
+  cat("No such pings, we continue to the next cleaning step.")
+  
+ 
+}
+
+rm(temp_AIS_sacrois)
+```
+
+## Exluding pings with an erroneaous location (based on lat/lon location)
+
+Problematic pings are those with a latitude or longitude change greater than 10
+(decimals) between consecutive pings (only the first ping is flagged).
+
+```{r results='asis'}
+calculate_lat_long_change <- function(data) {
+  data %>%
+    as.data.frame() %>%
+    group_by(MAREE_ID) %>%
+    arrange(timeais) %>%
+    mutate(
+      reliable_change_lat = ifelse(abs(Latitude - lag(Latitude)) > 10, "no", "yes"),
+      reliable_change_long = ifelse(abs(Longitude - lag(Longitude)) > 10, "no", "yes"),
+      problematic_pings = ifelse(reliable_change_lat == "no" | reliable_change_long == "no", "yes", "no"),
+      problematic_pings2 = ifelse(problematic_pings == "yes" & lag(problematic_pings) == "yes", "no", problematic_pings)
+    ) %>%
+    ungroup() %>% 
+          mutate(problematic_pings2 = as.factor(problematic_pings2))
+
+}
+
+AIS_sacrois2 <- calculate_lat_long_change(AIS_sacrois2) 
+
+temp_AIS_sacrois <- AIS_sacrois2 %>%
+  filter(problematic_pings2 =="yes")
+
+
+if (nrow(temp_AIS_sacrois) > 0) {
+  cat(nrow(temp_AIS_sacrois %>% distinct(MAREE_ID)), "trip_id with at least one ping with an odd longitude or latitude.", nrow(temp_AIS_sacrois), "pings are concerned representing", round(nrow(temp_AIS_sacrois) * 100 / nrow_AIS_sacrois, 4), "% of total pings.\n\n\n")
+
+
+  # Select a subset of trips for visualization
+  problematic_trips <- temp_AIS_sacrois %>%
+    distinct(MAREE_ID) %>%
+    slice(1:15)
+
+  line_data <- AIS_sacrois2 %>%
+        filter(MAREE_ID %in% problematic_trips$MAREE_ID) %>%
+    st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326, remove = FALSE) %>%
+    arrange(MAREE_ID, timeais) %>%
+    group_by(MAREE_ID) %>%
+    summarise(
+      geometry = st_combine(geometry) %>% st_cast("LINESTRING")
+    ) %>%
+    ungroup() %>%
+    mutate(MAREE_ID = as.factor(MAREE_ID))
+
+  point_data <- AIS_sacrois2 %>%
+        filter(MAREE_ID %in% problematic_trips$MAREE_ID) %>% 
+    st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326, remove = FALSE) 
+
+  trips_colors <- colorFactor(viridis(15), domain = problematic_trips$MAREE_ID)
+  pings_colors <- colorFactor(palette = c("black", "red"), domain = point_data$problematic_pings2)
+
+page = htmltools::tagList(leaflet() %>%
+    addTiles() %>%
+    addPolylines(
+      data = line_data, color = ~ trips_colors(MAREE_ID),
+      group = ~ line_data$MAREE_ID
+    ) %>%
+    addCircleMarkers(data = point_data, radius = 0.5, color = ~ pings_colors(problematic_pings2), popup = ~ paste("Maree :", MAREE_ID, "; Time:", timeais)) %>%
+    addScaleBar(position = "bottomleft", options = scaleBarOptions(imperial = FALSE)) %>%
+    addLegend(data = point_data, position = "topright", pal = pings_colors, values = ~problematic_pings2))
+
+cat(as.character(page))
+
+
+  AIS_sacrois2 <- AIS_sacrois2 %>%
+    anti_join(temp_AIS_sacrois) 
+  
+  rm(problematic_trips, trips_colors, pings_colors, point_data, line_data)
+} else {
+  cat("No such pings, we continue to the next cleaning step.")
+  
+ 
+}
+
+AIS_sacrois2 <- AIS_sacrois2 %>%
+  dplyr::select(-c(reliable_change_lat, reliable_change_long, problematic_pings, problematic_pings2))
+  
+
+rm(temp_AIS_sacrois)
+
+
+#  Verifie par curiosité si le pb est regle. Tout est bon !
+#   line_data <- AIS_sacrois2 %>%
+#         filter(MAREE_ID =="20452768") %>%
+#     st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326, remove = FALSE) %>%
+#     arrange(timeais) %>%
+#     summarise(
+#       geometry = st_combine(geometry) %>% st_cast("LINESTRING")
+#     ) %>%
+#     ungroup() 
+# 
+#   point_data <- AIS_sacrois2 %>%
+#         filter(MAREE_ID =="20452768") %>%
+#     st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326, remove = FALSE) 
+# 
+# leaflet() %>%
+#     addTiles() %>%
+#     addPolylines(
+#       data = line_data
+#     ) %>%
+#     addCircleMarkers(data = point_data, radius = 0.5) 
+```
+
+## Excluding pings with an erroneaous position (based on speed)
+
+A ping has incorrect coordinates when the speed between this ping and the
+previous one is greater than 30 knots, and the same applies to the following
+ping. A speed higher than 25 knots is typically considered unusual, but we set a
+threshold of 30 knots based on data visualization. Indeed, pings with speeds
+between 25 and 30 knots were found to be valid. These are the types of ping we
+will remove
+
+![](images/clipboard-480838106.png){width="386"}
+
+Here we use crs = 2154 to compute the distance and speed between pings.
+
+```{r results='asis'}
+calculate_speed <- function(data) {
+
+    data <- AIS_sacrois2 %>% 
+          as.data.frame() %>%
+          group_by(MAREE_ID) %>%
+    arrange(timeais) %>% 
+      st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326, remove = FALSE) %>%
+    st_transform(2154) %>% 
+    mutate(
+    lag_geom = lag(geometry),
+    dist_prev_km = as.numeric(st_distance(geometry, lag_geom, by_element = TRUE))/1000, 
+    elapsed_time_prev = as.numeric(difftime(timeais, lag(timeais), units = "hours")),
+     speed_kmh_prev = dist_prev_km / elapsed_time_prev,
+      speed_kn_prev = speed_kmh_prev / 1.852,
+      reliable_speed_prev = ifelse(speed_kn_prev > 30, "no", "yes"),
+         # for the next
+     lead_geom = lead(geometry),
+    dist_next_km = as.numeric(st_distance(geometry, lead_geom, by_element = TRUE))/1000,
+      elapsed_time_next = as.numeric(difftime(lead(timeais), timeais, units = "hours")),
+      speed_kmh_next = dist_next_km / elapsed_time_next,
+      speed_kn_next = speed_kmh_next / 1.852,
+      reliable_speed_next = ifelse(speed_kn_next > 30, "no", "yes")
+    ) 
+}
+
+
+
+AIS_sacrois2 <- calculate_speed(AIS_sacrois2) %>%
+  mutate(
+    problematic_pings = ifelse(reliable_speed_prev == "no" & reliable_speed_next == "no", "yes", "no"),
+    problematic_pings = as.factor(problematic_pings)
+  )
+
+
+temp_AIS_sacrois <- filter(AIS_sacrois2, problematic_pings == "yes")
+
+
+if (nrow(temp_AIS_sacrois) > 0) {
+
+  cat("There are", nrow(temp_AIS_sacrois), "pings with potentially wrong coordinates in", nrow(temp_AIS_sacrois %>% distinct(MAREE_ID)), "trip_id representing", round(nrow(temp_AIS_sacrois) * 100 / nrow_AIS_sacrois, 4), "% of total pings.\n\n\n")
+  
+  # Select a subset of trips for visualization
+problematic_trips <- temp_AIS_sacrois %>%
+  as.data.frame() %>% 
+  distinct(MAREE_ID) %>%
+  slice(1:10)
+
+line_data <- AIS_sacrois2 %>%
+  filter(MAREE_ID %in% problematic_trips$MAREE_ID) %>%
+  st_transform(4326) %>% 
+  group_by(MAREE_ID) %>%
+  summarise(
+    geometry = st_combine(geometry) %>% st_cast("LINESTRING")
+  ) %>%
+  ungroup() %>%
+  mutate(MAREE_ID = as.factor(MAREE_ID))
+
+point_data <- AIS_sacrois2 %>%
+    filter(MAREE_ID %in% problematic_trips$MAREE_ID) %>% 
+  st_transform(4326)
+
+# Set up color palettes
+trips_colors <- colorFactor(viridis(length(problematic_trips$MAREE_ID)), domain = problematic_trips$MAREE_ID)
+pings_colors <- colorFactor(palette = c("black", "red"), domain = point_data$problematic_pings)
+
+page = htmltools::tagList(leaflet() %>%
+  addTiles() %>%
+  addPolylines(
+    data = line_data, color = ~ trips_colors(MAREE_ID),
+    group = ~ line_data$MAREE_ID
+  ) %>%
+  addCircleMarkers(data = point_data, radius = 0.5, color = ~ pings_colors(problematic_pings), popup = ~ paste("Maree :", MAREE_ID, "Speed (previous ping, kn) = ", round(speed_kn_prev, 2), "Speed (next ping, kn)", round(speed_kn_next, digits = 1), "; Time:", timeais)) %>%
+  addScaleBar(position = "bottomleft", options = scaleBarOptions(imperial = FALSE)) %>%
+  addLegend(data = point_data, position = "topright", pal = pings_colors, values = ~problematic_pings))
+
+cat(as.character(page))
+
+AIS_sacrois2 <- AIS_sacrois2 %>%
+  st_drop_geometry() %>% 
+  anti_join(temp_AIS_sacrois)
+
+  rm(problematic_trips, trips_colors, pings_colors, point_data, line_data, temp_AIS_sacrois)
+} else {
+  cat("No such pings.")
+}
+
+AIS_sacrois2 <- AIS_sacrois2 %>%
+  dplyr::select(-c(dist_prev_km, dist_next_km, elapsed_time_prev, elapsed_time_next, speed_kmh_prev, speed_kn_prev, speed_kmh_next, speed_kn_next, reliable_speed_prev, reliable_speed_next, problematic_pings, lag_geom, lead_geom))
+
+rm(temp_AIS_sacrois)
+```
+
+After this step some pings could have either an excessive speed before or after.
+For example :
+
+```{r}
+AIS_sacrois2 <- calculate_speed(AIS_sacrois2) %>%
+  mutate(
+    problematic_pings = ifelse(reliable_speed_prev == "no" | reliable_speed_next == "no", "yes", "no"),
+    problematic_pings = as.factor(problematic_pings)
+  )
+
+temp_AIS_sacrois <- AIS_sacrois2 %>% 
+   filter(problematic_pings == "yes")
+
+cat("There are", nrow(temp_AIS_sacrois), "pings with an excessive speed before or after representing", round(nrow(temp_AIS_sacrois) * 100 / nrow_AIS_sacrois, 4), "% of total pings")
+  
+problematic_trips <- temp_AIS_sacrois %>%
+dplyr::distinct(MAREE_ID) %>%
+  slice(1:10)
+
+line_data <- AIS_sacrois2 %>%
+    filter(MAREE_ID %in% problematic_trips$MAREE_ID) %>%
+  st_transform(4326) %>% 
+  group_by(MAREE_ID) %>%
+  summarise(
+    geometry = st_combine(geometry) %>% st_cast("LINESTRING")
+  ) %>%
+  ungroup() %>%
+  mutate(MAREE_ID = as.factor(MAREE_ID))
+
+
+point_data <- AIS_sacrois2 %>%
+    filter(MAREE_ID %in% problematic_trips$MAREE_ID) %>% 
+st_transform(4326)
+
+trips_colors <- colorFactor(viridis(10), domain = problematic_trips$MAREE_ID)
+pings_colors <- colorFactor(palette = c("black", "red"), domain = point_data$problematic_pings)
+
+leaflet() %>%
+  addTiles() %>%
+  addPolylines(
+    data = line_data, color = ~ trips_colors(MAREE_ID),
+    group = ~ line_data$MAREE_ID
+  ) %>%
+  addCircleMarkers(data = point_data, radius = 0.5, color = ~ pings_colors(problematic_pings), popup = ~ paste("Maree :", MAREE_ID, "Speed (previous ping, kn) = ", round(speed_kn_prev, 2), "Speed (next ping, kn)", round(speed_kn_next, digits = 1), "; Time:", timeais)) %>%
+  addScaleBar(position = "bottomleft", options = scaleBarOptions(imperial = FALSE)) %>%
+  addLegend(data = point_data, position = "topright", pal = pings_colors, values = ~problematic_pings)
+
+
+  AIS_sacrois2 <- AIS_sacrois2 %>%
+  dplyr::select(-c(dist_prev_km, dist_next_km, elapsed_time_prev, elapsed_time_next, speed_kmh_prev, speed_kn_prev, speed_kmh_next, speed_kn_next, reliable_speed_prev, reliable_speed_next, problematic_pings, lag_geom, lead_geom))
+
+  rm(problematic_trips, trips_colors, pings_colors, point_data, line_data)
+```
+
+For these pings, we cannot have a harmonized approach, as sometimes the speed
+may be correct, but the ping is not at the correct location. We have therefore
+decided to keep these pings, as they represent a small subset of all pings. They
+could be further cleaned later, depending on the area of interest and the trip
+considered.
+
+# Save cleaned data
+
+```{r}
+output_path <- paste0(here("data/clean/parquet/AIS_CEREMA/year="), params$year)
+
+AIS_sacrois2 = AIS_sacrois2 %>% 
+  st_drop_geometry() %>% 
+     ungroup() %>% 
+  as.data.frame() 
+
+arrow::write_dataset(AIS_sacrois2, output_path, format = "parquet")
+
+cat("Data saved in data/clean/parquet/AIS_CEREMA")
+```
+
+# Map of pings
+
+The grid is generated at a cell size of 1/6 degree in both latitude and longitude
+
+```{r}
+e <- as(raster::extent(-10, 5, 42, 52), "SpatialPolygons") %>%
+  st_as_sf(crs= 4326) 
+
+grd_lrg <- st_make_grid(e, cellsize = c(1 / 6, 1 / 6), crs = 4326)
+
+grid <- st_sf(id_grid = 1:length(grd_lrg), geometry = grd_lrg)
+
+country <- st_read(here("data/raw/geomatics/ne_10m_admin_0_countries/ne_10m_admin_0_countries.shp"), quiet = TRUE) %>%
+  st_transform(4326)
+
+# Remove land-only grid cells
+cell_remove <- grid[st_within(grid, st_union(country %>% st_make_valid()), sparse = FALSE), ]
+grid <- grid %>% anti_join(cell_remove %>% as.data.frame())
+
+# Remove cells in medit
+centroids <- st_centroid(grid$geometry)
+
+# Extraire les coordonnées X (lon) et Y (lat)
+coords <- st_coordinates(centroids)
+
+# Ajouter à ton data.frame sf
+grid$lon_centroid <- coords[,1]
+grid$lat_centroid <- coords[,2]
+
+cell_remove <- grid %>% 
+  filter(lon_centroid> 2 & lat_centroid<46)
+
+grid <- grid %>% anti_join(cell_remove %>% as.data.frame()) %>% 
+  select(-c(lon_centroid, lat_centroid))
+
+# Assign grid cell IDs to AIS points
+AIS_sacrois2 <- AIS_sacrois2 %>%
+  st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326, remove = FALSE) %>%
+  st_join(grid)
+
+# Count pings in each grid cell
+grid_counts_AIS <- AIS_sacrois2 %>%
+  as.data.frame() %>%
+  group_by(id_grid) %>%
+  summarize(count = n()) %>%
+  ungroup() %>%
+  right_join(grid, by = "id_grid") %>%
+  st_sf() %>%
+  mutate(count = replace_na(count, 0))
+
+
+cat("Max number of ping per cell:", max(grid_counts_AIS$count))
+
+
+# Load the spatial dataset for OWF boundaries
+OWF <- st_read(here("data/clean/geomatics/OWF_boundaries.gpkg"), quiet = TRUE, crs = 4326)
+
+ggplot() +
+  geom_sf(data = grid_counts_AIS %>% filter(count == 0), fill = "grey55") +
+  geom_sf(data = grid_counts_AIS %>% filter(count != 0), aes(fill = log10(count))) +
+  geom_sf(data = country, fill = "grey") +
+  geom_sf(data = OWF %>% filter(facade2 != "Méditerranée"), fill = NA, color = "black", linewidth = 1) +
+  scale_fill_viridis(direction = -1, breaks = c(0,1, 2, 3, 4, 5), option = "magma", name = "Number of AIS pings (log10)", limits = c(0, 5)) +
+  coord_sf(
+    xlim = c(-10, 5),
+    ylim = c(42, 52)
+  ) +
+  ggtitle(params$year)
+
+ggsave(paste0(here("results/figures/0_data_cleaning_prep/map_ping_AIS"), "/", params$year, ".png", sep = ""), width = 20, height = 15, units = "cm", bg="white")
+
+cat("Map saved in results/figures/0_data_cleaning_prep/map_ping_AIS")
+
+
+rm(e, grd_lrg)
+
+
+AIS_sacrois2 = AIS_sacrois2 %>% 
+  st_drop_geometry() %>% as.data.frame()
+
+# Summary statistics
+summary_table <- tibble(
+  Metric = c(
+    "Total number of pings", "Cells at sea without pings", "Cells at sea with pings",
+    "Number of vessels", "Number of fishing trips"
+  ),
+  Value = c(
+    nrow(AIS_sacrois2),
+    grid_counts_AIS %>% filter(count == 0) %>% nrow(),
+    grid_counts_AIS %>% filter(count > 0) %>% nrow(),
+    AIS_sacrois2 %>% distinct(MMSI) %>% nrow(),
+    AIS_sacrois2 %>% distinct(MAREE_ID) %>% nrow()
+  )
+)
+
+print(summary_table)
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```

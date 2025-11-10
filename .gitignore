@@ -1,0 +1,26 @@
+# Data
+# exclude everything
+data/*
+
+# exception to the rule to keep the 
+!somefolder/README.md
+
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# vim stuff
+.swp
+
+# History files
+.Rhistory
+.Rapp.history
+
+# Session Data files
+.RData
+.RDataTmp
+
+# User-specific files
+.Ruserdata
+

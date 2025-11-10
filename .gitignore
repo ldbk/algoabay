@@ -24,3 +24,5 @@ Thumbs.db
 # User-specific files
 .Ruserdata
 
+# RStudio files
+.Rproj.user/

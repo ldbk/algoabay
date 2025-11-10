@@ -12,6 +12,7 @@ Thumbs.db
 
 # vim stuff
 .swp
+*.swp
 
 # History files
 .Rhistory

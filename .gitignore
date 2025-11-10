@@ -1,10 +1,12 @@
+# never ignore a gitignore
+!.gitignore
+
 # Data
 # exclude everything
-data/*
+data/**
 
-# exception to the rule to keep the 
+# exception to the rule to keep the data directory structure 
 !data/README.md
-
 
 # OS files
 .DS_Store

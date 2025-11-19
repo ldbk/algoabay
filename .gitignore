@@ -12,6 +12,8 @@ data/**
 # exclude everything
 admin/**
 
+# exclude html file
+*.html
 
 
 # OS files

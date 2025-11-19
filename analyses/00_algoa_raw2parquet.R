@@ -10,7 +10,7 @@ library(dplyr)
 here::i_am("algoabay.Rproj")
 
 # 1. convert csv to zip file if any csv file in raw
-csvfile<-dir(path=here("data","raw","ais"),patt=".csv",full=T,rec=T)
+csvfile<-dir(path=here("data","raw","algoa"),patt=".csv",full=T,rec=T)
 if(length(csvfile)>0){
 	#function to zip a 'uu' csv file and to delete it
 	fctzip<-function(uu){
@@ -37,12 +37,12 @@ zip2parquet<-function(a,dbpath){
 	return(ndat)
 }
 #}}}
-aisfile<-list.files(path=here("data","raw","ais"),full=T,rec=T)
-nbline<-mclapply(aisfile,zip2parquet,dbpath=here("data","processed","ais","parquet"))
+aisfile<-list.files(path=here("data","raw","algoa"),full=T,rec=T)
+nbline<-mclapply(aisfile,zip2parquet,dbpath=here("data","processed","algoa","parquet"))
 
 #control
 nb1<-sum(do.call("rbind",nbline))
-ds<-open_dataset(here("data/processed/ais/parquet"))
+ds<-open_dataset(here("data/processed/algoa/parquet"))
 #nb2<-ds%>%group_by(AN)%>%summarise(n=n())%>%collect()
 nb2<-ds%>%nrow()
 #nb2<-ds%>%nrow()

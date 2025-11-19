@@ -1,9 +1,8 @@
-Directory tree for: data
+Directory tree for data
 Generated on: 2025-11-10
 ==============================
 
 ```bash
-├── 📄 pipo.md
 ├── 📁 processed
 ├── 📁 raw
 │   └── 📁 ais

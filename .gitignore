@@ -8,6 +8,12 @@ data/**
 # exception to the rule to keep the data directory structure 
 !data/README.md
 
+# admin
+# exclude everything
+admin/**
+
+
+
 # OS files
 .DS_Store
 Thumbs.db

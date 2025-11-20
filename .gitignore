@@ -15,7 +15,6 @@ admin/**
 # exclude html file
 *.html
 
-
 # OS files
 .DS_Store
 Thumbs.db

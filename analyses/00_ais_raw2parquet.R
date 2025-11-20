@@ -5,23 +5,26 @@ library(here)  # for path
 library(parallel) #mclapply and co
 library(data.table)
 library(dplyr)
+library(readxl)
 
 #set the root of the project directory
 here::i_am("algoabay.Rproj")
 
 
-xlsfile<-dir(path=here("data","raw","ais"),patt=".xsl",full=T,rec=T)
 xlsxfile<-list.files(path=here("data","raw","ais"),full=T,rec=T)
 #read the xlsx file
 aiscol<-c("MMSI","IMO","LAT","LON","SPEED","HEADING","COURSE","TIMESTAMP","SHIPNAME","SHIPTYPE")
 dbpath<-here("data","processed","ais","parquet")
-dat2023<-read_xlsx(xlsxfile[1],col_names=aiscol)
+#guessing column type to avoid problem
+coltype<-c("numeric","text","numeric","numeric","text","text","text","date","text","text")
+
+dat2023<-read_xlsx(xlsxfile[1],col_names=aiscol,col_types=coltype)
 dat2023<-dat2023%>%mutate(year=substr(TIMESTAMP,1,4),
 			  month=substr(TIMESTAMP,6,7))
 dat2023%>%data.frame()%>%
 		group_by(year,month)%>%
 		write_dataset(path=dbpath,format="parquet")
-dat2024<-read_xlsx(xlsxfile[2],col_names=aiscol)
+dat2024<-read_xlsx(xlsxfile[2],col_names=aiscol,col_types=coltype)
 dat2024<-dat2024%>%mutate(year=substr(TIMESTAMP,1,4),
 			  month=substr(TIMESTAMP,6,7))
 dat2024%>%data.frame()%>%

@@ -1,0 +1,290 @@
+---
+title: "Cleaning AIS data"
+author: "Laurent Dubroca"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+params:
+  year: 2016
+output:
+  rmdformats::downcute:
+    lightbox: true
+    toc_depth: 3
+    code_folding: hide
+    number_section: yes
+editor_options:
+  chunk_output_type: console
+  markdown:
+    wrap: 80
+---
+
+```{r render,echo=FALSE,eval=F}
+#command to render the html outside Rstudio
+here::i_am("algoabay.Rproj")
+rmarkdown::render(here::here("analyses","01_ais_explo_clean.Rmd"),output_format="html_document",clean=T)
+```
+
+
+```{r knitsetup,echo=FALSE}
+operationnel <- TRUE
+knitr::opts_chunk$set(
+  warning = !operationnel,
+  message = !operationnel,
+  fig.width = 7,
+  fig.height = 5,
+  progress = !operationnel,
+  verbose = !operationnel
+)
+```
+
+```{r library,message = FALSE, warning=FALSE}
+library(arrow)
+library(here)
+library(leaflet)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scattermore)
+library(kableExtra)
+library(sf)
+library(terra)
+library(tidyterra)
+library(data.table)
+library(skimr)
+
+#library(tidyverse)
+#library(htmltools)
+#library(data.table)
+#library(viridis)
+#library(geosphere)
+#library(mapview)
+#library(htmltools)
+#library(future.apply)# devtools::build(here("code/r-packages_iapesca"))
+# devtools::document(here("code/r-packages_iapesca"))
+# 
+```
+
+```{r setup, include=FALSE}
+#here
+here::i_am("algoabay.Rproj")
+```
+
+# Introduction
+
+The dataset used in this analysis is provided by the. This document
+details a quick exploratory data analysis and some steps for cleaning of AIS (Automatic Identification System) data.
+The workflow involves:
+
+1\. Exploratory data analysis.
+
+2\. Filtering out invalid or irrelevant data (tbd).
+
+3\. Removing pings on land (tdb).
+
+4\. Addressing potential data quality issues, such as unrealistic vessel speeds
+(tbd).
+
+# Loading and inspecting AIS data
+
+We begin by loading the raw AIS dataset and inspecting its structure.
+
+```{r dataload}
+# Load AIS data for the specified year
+aisraw <- open_dataset(here("data/processed/ais/parquet"))
+
+# Inspect dataset structure
+glimpse(head(aisraw,10), width = 50)
+```
+
+## Comments
+
+The two excels files provided by SAMSA have a strange structure (name ending .
+csv.xlsx, no column name), suggesting
+a conversion from csv file to excel file. In such context, the size of the
+original files (supposed in csv) can preclude the whole inclusion of the
+information in the excel format (the infamous maximum number of line). It would
+be interesting to clarify this with SAMSA or the data provider.
+
+# Exploratory data analysis 
+
+Basic information.
+
+## Counting stuff
+
+Number of pings by time, vessels number etc.
+
+
+```{r, globsummary}
+# Summary statistics 
+totnb <- aisraw %>% 
+	summarise(t1=min(TIMESTAMP),t2=max(TIMESTAMP),
+		  x1=min(LON),x2=max(LON),y1=min(LAT),y2=max(LAT),
+		  nbping=n(),nbmmsi=n_distinct(as.character(MMSI)),
+		  #nbimo=n_distinct(as.character(IMO)),
+		  nbvessel=n_distinct(SHIPNAME),nbcatvessel=n_distinct(SHIPTYPE))%>%
+	collect()%>%
+	transmute(time_coverage=paste0(substr(t1,1,10)," - ",substr(t2,1,10)),
+	       duration=difftime(t2,t1,unit="days"),
+	       range_lat=paste0(x1," - ",x2),
+	       range_long=paste0(y1," - ",y2),
+	       nbping,nbmmsi,nbvessel,nbcatvessel)
+kable(t(totnb))
+# Summary statistics by month
+totnbmonth <- aisraw %>% 
+	group_by(year,month)%>%
+	summarise(nbping=n(),nbmmsi=n_distinct(as.character(MMSI)),
+		  #nbimo=n_distinct(as.character(IMO)),
+		  nbvessel=n_distinct(SHIPNAME),nbcatvessel=n_distinct(SHIPTYPE))%>%
+	collect()%>%
+	ungroup()%>%
+	mutate(time=as.factor(paste0(year,"-",sprintf("%02d",month))))%>%
+	pivot_longer(1:6)%>%
+	filter(!name%in%c("month","year"))
+
+ggplot(totnbmonth,aes(x=time,y=value))+
+	geom_col()+
+	facet_wrap(~name,scale="free")+
+	theme_bw()+
+	theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+```
+
+## Comments 
+
+1,5 years of data. Inconsistency between 2023 and 2024 data for the number of ping and vessels. February 2024 has a drop in ping and vessel. June and December 2023 same patterns. Why ? Hypothesis : conversion issues between csv to excel ?
+
+
+# Mapping stuff
+
+Mapping the info.
+
+```{r, rawmap}
+aislimgeo<-aisraw%>%summarise(x1=min(LON),x2=max(LON),y1=min(LAT),y2=max(LAT))%>%
+	collect()
+aisdat<-aisraw%>%collect()
+p1  <- ggplot() +
+    geom_scattermore(data = aisdat, aes(x = LON, y = LAT), alpha = 0.7)+
+    theme_bw()+xlab("Longitude")+ylab("Latitude")
+print(p1)
+p2  <- ggplot() +
+    geom_scattermore(data = aisdat, aes(x = LON, y = LAT), alpha = 0.7)+
+    facet_grid(year~month)+
+    theme_bw()+xlab("Longitude")+ylab("Latitude")
+print(p2)
+
+#rasterize
+r0<-rast(nrows=50,ncols=100,
+     xmin=min(aisdat$LON),xmax=max(aisdat$LON),
+     ymin=min(aisdat$LAT),ymax=max(aisdat$LAT))
+pipo<-aisdat%>%select(LON,LAT)%>%as.matrix
+pipoid <- as.data.table(aisdat)[, .(id=paste(year, sprintf("%02d", month)))]
+r1<-rasterize(pipo,r0,fun="count")
+p3<-ggplot()+
+	geom_spatraster(data=r1)+
+	scale_fill_distiller(palette='Spectral',name="Number of pings",trans="log10")+
+	theme_bw()
+plot(p3)
+
+#monthly raster
+r2<-c()
+timeid<-unique(pipoid)$id
+for(i in timeid){
+	print(i)
+	rtmp<-rasterize(pipo[pipoid$id%in%i,],r0,fun="count")
+	names(rtmp)<-i
+	r2<-c(r2,rtmp)
+}
+r2<-do.call("c",r2)
+p4<-ggplot()+
+	geom_spatraster(data=r2)+
+	facet_wrap(~lyr)+
+	scale_fill_distiller(palette='Spectral',name="Number of pings",trans="log10")+
+	theme_bw()
+
+plot(p4)
+
+
+
+
+
+
+#leaflet()%>%
+#addTiles()%>%
+#	fitBounds(aislimgeo$x1,aislimgeo$y1,aislimgeo$x2,aislimgeo$y2)%>%
+#	addRasterImage(r1,colors="Spectral",opacity=0.8)%>%
+#	addCircleMarkers(head(aisdat$LON,n=10000000), head(aisdat$LAT,n=10000000),clusterOptions = markerClusterOptions())
+
+
+
+
+```
+
+## Comments
+
+Data strickly cut by SA ZEE (guessing ?).
+
+
+# "Trip" level info
+
+Test to assess info at the vessel scale. Average duration between ping?
+
+```{r, trip}
+aisdat<-aisdat%>%arrange(SHIPNAME,TIMESTAMP)%>%
+	group_by(SHIPNAME)%>%
+	mutate(timebefore=lag(TIMESTAMP))%>%
+	mutate(dt=TIMESTAMP-timebefore)%>%
+	ungroup()
+navid<-aisdat%>%group_by(SHIPNAME,SHIPTYPE)%>%summarise(n=n(),mediandt=median(dt,na.rm=T),rangetime=max(TIMESTAMP)-min(TIMESTAMP))%>%ungroup()%>%
+	separate(SHIPTYPE,into=c("nb","simpletype","truc"))
+navidlong<-navid%>%transmute(simpletype,n,mediandt=mediandt/3600,rangetime=rangetime/(3600*24))%>%mutate(mediandt=as.integer(mediandt),rangetime=as.integer(rangetime))%>%pivot_longer(2:4)
+
+#graph histo mediantime and coverage
+ggplot(navidlong,aes(x=name,y=value,group=simpletype,fill=simpletype))+
+	geom_violin(quantile.linetype = 1L)+
+	facet_wrap(name~.,scale="free")+
+	scale_y_continuous(trans="log10")+
+	theme_bw()
+
+#basic stat
+navid%>%group_by(simpletype)%>%skim
+
+
+```
+
+
+
+
+## Comments
+
+Hourly data (aka two pings are separated by 3600s in average) : compatibility
+with the aim of the project ? Can we compare density/sound like mapping of
+traffic against indicator of ecoacoustic with this time range ?
+
+# Mapping some vessels tracks
+
+Select random trips and plot them using leaflet.
+
+```{r, funtrip}
+
+#select some vessel
+selnav<-navid%>%group_by(simpletype)%>%filter(n>100)%>%sample_n(1)
+kbl(selnav)
+selais<-aisdat%>%filter(SHIPNAME%in%selnav$SHIPNAME)
+
+
+palet<-colorFactor("RdYlBu", levels = unique(selais$SHIPNAME)) 
+
+leaflet(selais)%>%
+addTiles()%>%
+addCircleMarkers(lng=selais$LON,lat=selais$LAT,radius=3,color=palet(selais$SHIPNAME))%>%
+addLegend('bottomright', pal = palet,values=unique(selais$SHIPNAME))
+
+
+```
+
+
+
+# Session info
+
+```{r}
+sessionInfo()
+```
+

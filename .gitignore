@@ -33,6 +33,7 @@ Thumbs.db
 
 # User-specific files
 .Ruserdata
+.Renviron
 
 # RStudio files
 .Rproj.user/
